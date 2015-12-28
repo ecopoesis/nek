@@ -42,7 +42,12 @@ enum Token {
     tok_then = -7,
     tok_else = -8,
     tok_for = -9,
-    tok_in = -10
+    tok_in = -10,
+
+    // operators
+    tok_binary = -11,
+    tok_unary = -12
+
 };
 
 static std::string IdentifierStr; // Filled in if tok_identifier
@@ -82,6 +87,12 @@ static int gettok() {
         }
         if (IdentifierStr == "in") {
             return tok_in;
+        }
+        if (IdentifierStr == "binary") {
+            return tok_binary;
+        }
+        if (IdentifierStr == "unary") {
+            return tok_unary;
         }
 
         return tok_identifier;
@@ -178,9 +189,26 @@ namespace {
     class PrototypeAST {
         std::string Name;
         std::vector<std::string> Args;
+        bool isOperator;
+        unsigned Precedence;  // Precedence if a binary op.
 
     public:
-        PrototypeAST(const std::string &Name, const std::vector<std::string> &Args) : Name(Name), Args(Args) { }
+        PrototypeAST(const std::string &Name, const std::vector<std::string> &Args, bool isoperator = false, unsigned prec = 0) : Name(Name), Args(Args), isOperator(isoperator), Precedence(prec) { }
+
+        bool isUnaryOp() const {
+            return isOperator && Args.size() == 1;
+        }
+
+        bool isBinaryOp() const {
+            return isOperator && Args.size() == 2;
+        }
+
+        char getOperatorName() const {
+            assert(isUnaryOp() || isBinaryOp());
+            return Name[Name.size()-1];
+        }
+
+        unsigned getBinaryPrecedence() const { return Precedence; }
 
         Function *Codegen();
     };
@@ -472,12 +500,37 @@ static ExprAST *ParseExpression() {
 /// prototype
 ///   ::= id '(' id* ')'
 static PrototypeAST *ParsePrototype() {
-    if (CurTok != tok_identifier) {
-        return ErrorP("Expected function name in prototype");
-    }
+    std::string FnName;
 
-    std::string FnName = IdentifierStr;
-    getNextToken();
+    unsigned Kind = 0;  // 0 = identifier, 1 = unary, 2 = binary.
+    unsigned BinaryPrecedence = 30;
+
+    switch (CurTok) {
+        default:
+            return ErrorP("Expected function name in prototype");
+        case tok_identifier:
+            FnName = IdentifierStr;
+            Kind = 0;
+            getNextToken();
+            break;
+        case tok_binary:
+            getNextToken();
+            if (!isascii(CurTok))
+                return ErrorP("Expected binary operator");
+            FnName = "binary";
+            FnName += (char)CurTok;
+            Kind = 2;
+            getNextToken();
+
+            // Read the precedence if present.
+            if (CurTok == tok_number) {
+                if (NumVal < 1 || NumVal > 100)
+                    return ErrorP("Invalid precedecnce: must be 1..100");
+                BinaryPrecedence = (unsigned)NumVal;
+                getNextToken();
+            }
+            break;
+    }
 
     if (CurTok != '(') {
         return ErrorP("Expected '(' in prototype");
@@ -487,15 +540,19 @@ static PrototypeAST *ParsePrototype() {
     while (getNextToken() == tok_identifier) {
         ArgNames.push_back(IdentifierStr);
     }
-
     if (CurTok != ')') {
         return ErrorP("Expected ')' in prototype");
     }
 
     // success.
-    getNextToken(); // eat ')'.
+    getNextToken();  // eat ')'.
 
-    return new PrototypeAST(FnName, ArgNames);
+    // Verify right number of names for operator.
+    if (Kind && ArgNames.size() != Kind) {
+        return ErrorP("Invalid number of operands for operator");
+    }
+
+    return new PrototypeAST(FnName, ArgNames, Kind != 0, BinaryPrecedence);
 }
 
 /// definition ::= 'def' prototype expression
@@ -559,19 +616,24 @@ Value *BinaryExprAST::Codegen() {
     if (L == 0 || R == 0) return 0;
 
     switch (Op) {
-        case '+':
-            return Builder.CreateFAdd(L, R, "addtmp");
-        case '-':
-            return Builder.CreateFSub(L, R, "subtmp");
-        case '*':
-            return Builder.CreateFMul(L, R, "multmp");
+        case '+': return Builder.CreateFAdd(L, R, "addtmp");
+        case '-': return Builder.CreateFSub(L, R, "subtmp");
+        case '*': return Builder.CreateFMul(L, R, "multmp");
         case '<':
             L = Builder.CreateFCmpULT(L, R, "cmptmp");
             // Convert bool 0/1 to double 0.0 or 1.0
-            return Builder.CreateUIToFP(L, Type::getDoubleTy(getGlobalContext()), "booltmp");
-        default:
-            return ErrorV("invalid binary operator");
+            return Builder.CreateUIToFP(L, Type::getDoubleTy(getGlobalContext()),
+                                        "booltmp");
+        default: break;
     }
+
+    // If it wasn't a builtin binary operator, it must be a user defined one. Emit
+    // a call to it.
+    Function *F = TheModule->getFunction(std::string("binary")+Op);
+    assert(F && "binary operator not found!");
+
+    Value *Ops[2] = { L, R };
+    return Builder.CreateCall(F, Ops, "binop");
 }
 
 Value *CallExprAST::Codegen() {
@@ -640,8 +702,14 @@ Function *FunctionAST::Codegen() {
     NamedValues.clear();
 
     Function *TheFunction = Proto->Codegen();
-    if (TheFunction == 0)
+    if (TheFunction == 0) {
         return 0;
+    }
+
+    // If this is an operator, install it.
+    if (Proto->isBinaryOp()) {
+        BinopPrecedence[Proto->getOperatorName()] = Proto->getBinaryPrecedence();
+    }
 
     // Create a new basic block to start insertion into.
     BasicBlock *BB = BasicBlock::Create(getGlobalContext(), "entry", TheFunction);
