@@ -1,8 +1,16 @@
-#include "llvm/IR/Verifier.h"
+#include "llvm/Analysis/Passes.h"
+#include "llvm/ExecutionEngine/ExecutionEngine.h"
+#include "llvm/ExecutionEngine/MCJIT.h"
+#include "llvm/ExecutionEngine/SectionMemoryManager.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/PassManager.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Transforms/Scalar.h"
 #include <cctype>
 #include <cstdio>
 #include <map>
@@ -400,6 +408,7 @@ static PrototypeAST *ParseExtern() {
 static Module *TheModule;
 static IRBuilder<> Builder(getGlobalContext());
 static std::map<std::string, Value*> NamedValues;
+static FunctionPassManager *TheFPM;
 
 Value *ErrorV(const char *Str) {
     Error(Str);
@@ -520,6 +529,9 @@ Function *FunctionAST::Codegen() {
         // Validate the generated code, checking for consistency.
         verifyFunction(*TheFunction);
 
+        // Optimize the function.
+        TheFPM->run(*TheFunction);
+
         return TheFunction;
     }
 
@@ -530,8 +542,10 @@ Function *FunctionAST::Codegen() {
 
 
 //===----------------------------------------------------------------------===//
-// Top-Level parsing
+// Top-Level parsing and JIT
 //===----------------------------------------------------------------------===//
+
+static ExecutionEngine *TheExecutionEngine;
 
 static void HandleDefinition() {
     if (FunctionAST *F = ParseDefinition()) {
@@ -563,6 +577,15 @@ static void HandleTopLevelExpression() {
         if (Function *LF = F->Codegen()) {
             fprintf(stderr, "Read top-level expression:");
             LF->dump();
+
+            TheExecutionEngine->finalizeObject();
+            // JIT the function, returning a function pointer.
+            void *FPtr = TheExecutionEngine->getPointerToFunction(LF);
+
+            // Cast it to the right type (takes no arguments, returns a double) so we
+            // can call it as a native function.
+            double (*FP)() = (double (*)())(intptr_t)FPtr;
+            fprintf(stderr, "Evaluated to %f\n", FP());
         }
     } else {
         // Skip token for error recovery.
@@ -609,6 +632,9 @@ double putchard(double X) {
 //===----------------------------------------------------------------------===//
 
 int main() {
+    InitializeNativeTarget();
+    InitializeNativeTargetAsmPrinter();
+    InitializeNativeTargetAsmParser();
     LLVMContext &Context = getGlobalContext();
 
     // Install standard binary operators.
@@ -623,10 +649,46 @@ int main() {
     getNextToken();
 
     // Make the module, which holds all the code.
-    TheModule = new Module("nek jit", Context);
+    std::unique_ptr<Module> Owner = make_unique<Module>("nek jit", Context);
+    TheModule = Owner.get();
+
+    // Create the JIT.  This takes ownership of the module.
+    std::string ErrStr;
+    TheExecutionEngine = EngineBuilder(std::move(Owner))
+                    .setErrorStr(&ErrStr)
+                    .setMCJITMemoryManager(llvm::make_unique<SectionMemoryManager>())
+                    .create();
+    if (!TheExecutionEngine) {
+        fprintf(stderr, "Could not create ExecutionEngine: %s\n", ErrStr.c_str());
+        exit(1);
+    }
+
+    FunctionPassManager OurFPM(TheModule);
+
+    // Set up the optimizer pipeline.  Start with registering info about how the
+    // target lays out data structures.
+    TheModule->setDataLayout(TheExecutionEngine->getDataLayout());
+    OurFPM.add(new DataLayoutPass());
+    // Provide basic AliasAnalysis support for GVN.
+    OurFPM.add(createBasicAliasAnalysisPass());
+    // Do simple "peephole" optimizations and bit-twiddling optzns.
+    OurFPM.add(createInstructionCombiningPass());
+    // Reassociate expressions.
+    OurFPM.add(createReassociatePass());
+    // Eliminate Common SubExpressions.
+    OurFPM.add(createGVNPass());
+    // Simplify the control flow graph (deleting unreachable blocks, etc).
+    OurFPM.add(createCFGSimplificationPass());
+
+    OurFPM.doInitialization();
+
+    // Set the global so the code gen can use this.
+    TheFPM = &OurFPM;
 
     // Run the main "interpreter loop" now.
     MainLoop();
+
+    TheFPM = 0;
 
     // Print out all of the generated code.
     TheModule->dump();
