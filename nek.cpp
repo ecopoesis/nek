@@ -242,6 +242,16 @@ namespace {
 
         virtual Value *Codegen();
     };
+
+    /// UnaryExprAST - Expression class for a unary operator.
+    class UnaryExprAST : public ExprAST {
+        char Opcode;
+        ExprAST *Operand;
+    public:
+        UnaryExprAST(char opcode, ExprAST *operand)  : Opcode(opcode), Operand(operand) {}
+
+        virtual Value *Codegen();
+    };
 } // end anonymous namespace
 
 //===----------------------------------------------------------------------===//
@@ -451,6 +461,22 @@ static ExprAST *ParsePrimary() {
     }
 }
 
+/// unary
+///   ::= primary
+///   ::= '!' unary
+static ExprAST *ParseUnary() {
+    // If the current token is not an operator, it must be a primary expr.
+    if (!isascii(CurTok) || CurTok == '(' || CurTok == ',')
+        return ParsePrimary();
+
+    // If this is a unary operator, read it.
+    int Opc = CurTok;
+    getNextToken();
+    if (ExprAST *Operand = ParseUnary())
+        return new UnaryExprAST(Opc, Operand);
+    return 0;
+}
+
 /// binoprhs
 ///   ::= ('+' primary)*
 static ExprAST *ParseBinOpRHS(int ExprPrec, ExprAST* LHS) {
@@ -469,7 +495,7 @@ static ExprAST *ParseBinOpRHS(int ExprPrec, ExprAST* LHS) {
         getNextToken(); // eat binop
 
         // Parse the primary expression after the binary operator.
-        ExprAST *RHS = ParsePrimary();
+        ExprAST *RHS = ParseUnary();
         if (!RHS) {
             return 0;
         }
@@ -491,7 +517,7 @@ static ExprAST *ParseBinOpRHS(int ExprPrec, ExprAST* LHS) {
 ///   ::= primary binoprhs
 ///
 static ExprAST *ParseExpression() {
-    ExprAST *LHS = ParsePrimary();
+    ExprAST *LHS = ParseUnary();
     if (!LHS) return 0;
 
     return ParseBinOpRHS(0, LHS);
@@ -513,10 +539,21 @@ static PrototypeAST *ParsePrototype() {
             Kind = 0;
             getNextToken();
             break;
+        case tok_unary:
+            getNextToken();
+            if (!isascii(CurTok)) {
+                return ErrorP("Expected unary operator");
+            }
+            FnName = "unary";
+            FnName += (char)CurTok;
+            Kind = 1;
+            getNextToken();
+            break;
         case tok_binary:
             getNextToken();
-            if (!isascii(CurTok))
+            if (!isascii(CurTok)) {
                 return ErrorP("Expected binary operator");
+            }
             FnName = "binary";
             FnName += (char)CurTok;
             Kind = 2;
@@ -864,6 +901,20 @@ Value *ForExprAST::Codegen() {
 
     // for expr always returns 0.0.
     return Constant::getNullValue(Type::getDoubleTy(getGlobalContext()));
+}
+
+Value *UnaryExprAST::Codegen() {
+    Value *OperandV = Operand->Codegen();
+    if (OperandV == 0) {
+        return 0;
+    }
+
+    Function *F = TheModule->getFunction(std::string("unary")+Opcode);
+    if (F == 0) {
+        return ErrorV("Unknown unary operator");
+    }
+
+    return Builder.CreateCall(F, OperandV, "unop");
 }
 
 //===----------------------------------------------------------------------===//
