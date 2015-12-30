@@ -10,6 +10,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/PassManager.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar.h"
 #include <cctype>
 #include <cstdio>
@@ -54,18 +55,19 @@ enum Token {
 
 static std::string IdentifierStr; // Filled in if tok_identifier
 static double NumVal;             // Filled in if tok_number
+static FILE *fp;
 
-/// gettok - Return the next token from standard input.
+/// gettok - Return the next token from the file
 static int gettok() {
     static int LastChar = ' ';
 
     // Skip any whitespace.
     while (isspace(LastChar))
-        LastChar = getchar();
+        LastChar = fgetc(fp);
 
     if (isalpha(LastChar)) { // identifier: [a-zA-Z][a-zA-Z0-9]*
         IdentifierStr = LastChar;
-        while (isalnum((LastChar = getchar()))) {
+        while (isalnum((LastChar = fgetc(fp)))) {
             IdentifierStr += LastChar;
         }
 
@@ -107,7 +109,7 @@ static int gettok() {
         std::string NumStr;
         do {
             NumStr += LastChar;
-            LastChar = getchar();
+            LastChar = fgetc(fp);
         } while (isdigit(LastChar) || LastChar == '.');
 
         NumVal = strtod(NumStr.c_str(), nullptr);
@@ -117,7 +119,7 @@ static int gettok() {
     if (LastChar == '#') {
         // Comment until end of line.
         do
-            LastChar = getchar();
+            LastChar = fgetc(fp);
         while (LastChar != EOF && LastChar != '\n' && LastChar != '\r');
 
         if (LastChar != EOF) {
@@ -132,7 +134,7 @@ static int gettok() {
 
     // Otherwise, just return the character as its ascii value.
     int ThisChar = LastChar;
-    LastChar = getchar();
+    LastChar = fgetc(fp);
     return ThisChar;
 }
 
@@ -596,6 +598,8 @@ static ExprAST *ParseExpression() {
 
 /// prototype
 ///   ::= id '(' id* ')'
+///   ::= binary LETTER number? (id, id)
+///   ::= unary LETTER (id)
 static PrototypeAST *ParsePrototype() {
     std::string FnName;
 
@@ -679,7 +683,7 @@ static FunctionAST *ParseDefinition() {
 static FunctionAST *ParseTopLevelExpr() {
     if (ExprAST *E = ParseExpression()) {
         // Make an anonymous proto.
-        PrototypeAST *Proto = new PrototypeAST("", std::vector<std::string>());
+        PrototypeAST *Proto = new PrototypeAST("main", std::vector<std::string>());
         return new FunctionAST(Proto, E);
     }
     return 0;
@@ -1120,9 +1124,8 @@ static ExecutionEngine *TheExecutionEngine;
 
 static void HandleDefinition() {
     if (FunctionAST *F = ParseDefinition()) {
-        if (Function *LF = F->Codegen()) {
-            fprintf(stderr, "Read function definition:");
-            LF->dump();
+        if (!F->Codegen()) {
+            fprintf(stderr, "Error reading function definition:");
         }
     } else {
         // Skip token for error recovery.
@@ -1132,9 +1135,8 @@ static void HandleDefinition() {
 
 static void HandleExtern() {
     if (PrototypeAST *P = ParseExtern()) {
-        if (Function *F = P->Codegen()) {
-            fprintf(stderr, "Read extern: ");
-            F->dump();
+        if (!P->Codegen()) {
+            fprintf(stderr, "Error reading extern");
         }
     } else {
         // Skip token for error recovery.
@@ -1145,11 +1147,8 @@ static void HandleExtern() {
 static void HandleTopLevelExpression() {
     // Evaluate a top-level expression into an anonymous function.
     if (FunctionAST *F = ParseTopLevelExpr()) {
+        /*
         if (Function *LF = F->Codegen()) {
-            fprintf(stderr, "Read top-level expression:");
-            LF->dump();
-
-
             TheExecutionEngine->finalizeObject();
             // JIT the function, returning a function pointer.
             void *FPtr = TheExecutionEngine->getPointerToFunction(LF);
@@ -1158,7 +1157,11 @@ static void HandleTopLevelExpression() {
             // can call it as a native function.
             double (*FP)() = (double (*)())(intptr_t)FPtr;
             fprintf(stderr, "Evaluated to %f\n", FP());
+        }
+        */
 
+        if (!F->Codegen()) {
+          fprintf(stderr, "Error generating code for top level expr");
         }
     } else {
         // Skip token for error recovery.
@@ -1169,7 +1172,6 @@ static void HandleTopLevelExpression() {
 /// top ::= definition | external | expression | ';'
 static void MainLoop() {
     while (1) {
-        fprintf(stderr, "ready> ");
         switch (CurTok) {
             case tok_eof:
                 return;
@@ -1190,27 +1192,17 @@ static void MainLoop() {
 }
 
 //===----------------------------------------------------------------------===//
-// "Library" functions that can be "extern'd" from user code.
-//===----------------------------------------------------------------------===//
-
-/// putchard - putchar that takes a double and returns 0.
-extern "C" double putchard(double X) {
-    putchar((char)X);
-    return 0;
-}
-
-/// printd - printf that takes a double prints it as "%f\n", returning 0.
-extern "C" double printd(double X) {
-    printf("%f\n", X);
-    return 0;
-}
-
-
-//===----------------------------------------------------------------------===//
 // Main driver code.
 //===----------------------------------------------------------------------===//
 
-int main() {
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "file to compile is required");
+        exit(0);
+    }
+
+    fp = fopen(argv[1], "r");
+
     InitializeNativeTarget();
     InitializeNativeTargetAsmPrinter();
     InitializeNativeTargetAsmParser();
@@ -1225,11 +1217,10 @@ int main() {
     BinopPrecedence['*'] = 40; // highest.
 
     // Prime the first token.
-    fprintf(stderr, "ready> ");
     getNextToken();
 
     // Make the module, which holds all the code.
-    std::unique_ptr<Module> Owner = make_unique<Module>("nek jit", Context);
+    std::unique_ptr<Module> Owner = make_unique<Module>(argv[1], Context);
     TheModule = Owner.get();
 
     // Create the JIT.  This takes ownership of the module.
@@ -1249,6 +1240,8 @@ int main() {
     // target lays out data structures.
     TheModule->setDataLayout(TheExecutionEngine->getDataLayout());
     OurFPM.add(new DataLayoutPass());
+
+#if 0
     // Provide basic AliasAnalysis support for GVN.
     OurFPM.add(createBasicAliasAnalysisPass());
     // Promote allocas to registers.
@@ -1261,6 +1254,7 @@ int main() {
     OurFPM.add(createGVNPass());
     // Simplify the control flow graph (deleting unreachable blocks, etc).
     OurFPM.add(createCFGSimplificationPass());
+#endif
 
     OurFPM.doInitialization();
 
@@ -1272,8 +1266,12 @@ int main() {
 
     TheFPM = 0;
 
+    raw_fd_ostream out(STDOUT_FILENO, false);
+
     // Print out all of the generated code.
-    TheModule->dump();
+    TheModule->print(out, nullptr);
+
+    fclose(fp);
 
     return 0;
 }

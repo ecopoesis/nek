@@ -13,16 +13,15 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
-set(SOURCE_FILES
-    nek.cpp)
+add_executable(nek-cpp nek.cpp)
+add_library(nek-standard STATIC standard.cpp)
 
-add_executable(nek-cpp ${SOURCE_FILES})
-
-set(EXECUTABLE_OUTPUT_PATH dist/${CMAKE_BUILD_TYPE})
+set(EXECUTABLE_OUTPUT_PATH out/${CMAKE_BUILD_TYPE})
+set_target_properties(nek-standard PROPERTIES ARCHIVE_OUTPUT_DIRECTORY out)
 
 # Find the libraries that correspond to the LLVM components
 # that we wish to use
 llvm_map_components_to_libnames(llvm_libs support core irreader mcjit native)
 
 # Link against LLVM libraries
-target_link_libraries(nek-cpp ${llvm_libs})
+target_link_libraries(nek-cpp nek-standard ${llvm_libs})
