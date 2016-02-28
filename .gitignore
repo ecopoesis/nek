@@ -38,3 +38,6 @@ install_manifest.txt
 *.exe
 *.out
 *.app
+
+# Mac Droppings 
+.DS_Store
