@@ -30,7 +30,7 @@ This creates two things you need:
 2) Use clang to compile the IR and link it with the standard library:
 
 
-    clang fib.ll build/out/libnek-standard.a -o fib
+    clang -g fib.ll build/out/libnek-standard.a -o fib
 
 
 3) Run your program:
