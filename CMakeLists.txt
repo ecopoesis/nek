@@ -3,7 +3,7 @@ project(nek-cpp)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
-set(ENV{LLVM_DIR} /usr/local/Cellar/llvm/3.6.2/)
+set(ENV{LLVM_DIR} /Users/miker/tools/clang+llvm-3.6.2-x86_64-apple-darwin/)
 
 find_package(LLVM REQUIRED CONFIG)
 
