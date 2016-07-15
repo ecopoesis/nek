@@ -8,6 +8,7 @@ Here's a list of goals for nek:
 * thread instead of def? automatic threadpools?
 * def vs var?
 * no = just := for assignment and == for comparison
+* built in docstring stuff - comments as first class citizens
 
 FizzBuzz
 ------------
